@@ -2326,7 +2326,7 @@ const ICON_SVG={
   tools:`<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" width="100%" height="100%"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l.3-.3a3 3 0 0 0-4.2-4.2l-.3.3a1 1 0 0 0-.4.8v.4zM5 5l5 5M3 18l4-4"/></svg>`,
 };
 
-let sectorConfig=JSON.parse(localStorage.getItem('kf5_sectors')||JSON.stringify(DEFAULT_SECTORS));
+let sectorConfig=[...DEFAULT_SECTORS];
 // Remove gerencia from sectorConfig if still present
 sectorConfig=sectorConfig.filter(s=>s.key!=='gerencia');
 // Garantir ordem correta: vendedor, designer, laser, montagem, embalagem, nfe
@@ -2337,7 +2337,6 @@ sectorConfig=sectorConfig.filter(s=>s.key!=='gerencia');
   sectorConfig.filter(s=>!ORDER.includes(s.key)).forEach(s=>sorted.push(s));
   sectorConfig=sorted;
 })();
-localStorage.setItem('kf5_sectors',JSON.stringify(sectorConfig));
 
 function buildDynamic(){
   const sc=sectorConfig;
@@ -2386,13 +2385,14 @@ const DEF_USERS=[
    STATE
 ════════════════════════════════════════════ */
 let CU=null;
-let orders=JSON.parse(localStorage.getItem('kf5_orders')||'[]');
-let catalog=JSON.parse(localStorage.getItem('kf5_cat')||'[]');
-let users=JSON.parse(localStorage.getItem('kf5_users')||JSON.stringify(DEF_USERS));
-// Remove gerencia users if still present
-users=users.filter(u=>u.sector!=='gerencia');
-localStorage.setItem('kf5_users',JSON.stringify(users));
-let siteName=localStorage.getItem('kf5_name')||'KitFlow';
+// Supabase é a única fonte de verdade — sem localStorage para dados principais
+let orders=[];
+let catalog=[];
+let users=[...DEF_USERS].filter(u=>u.sector!=='gerencia');
+let siteName='KitFlow';
+// Limpa dados antigos do localStorage para não interferir
+// Limpa TODO o localStorage antigo para forçar dados do Supabase
+try{localStorage.clear();}catch(e){}
 let newPecas=[],activeFilter='all',curPage='dashboard',editUid=null,urgOid=null;
 let cdTick=null,tvInterval=null,curNotifTab='received';
 
@@ -2401,7 +2401,24 @@ let cdTick=null,tvInterval=null,curNotifTab='received';
 ════════════════════════════════════════════ */
 const SB_URL='https://mghbdiohyauyiouqdglp.supabase.co';
 const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1naGJkaW9oeWF1eWlvdXFkZ2xwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMyMTYxNDMsImV4cCI6MjA4ODc5MjE0M30.lVhqh-ntZQCoTNLLWM2m2Ozvtp7G488qfOLPmU_xJsI';
-const sb=supabase.createClient(SB_URL,SB_KEY);
+const sb=supabase.createClient(SB_URL,SB_KEY,{
+  auth:{persistSession:false,autoRefreshToken:false},
+  global:{headers:{'apikey':SB_KEY}}
+});
+// Teste de conexão imediato
+sb.from('config').select('id').limit(1).then(({data,error})=>{
+  const dot=document.getElementById('sb-dot');
+  const lbl=document.getElementById('sb-lbl');
+  if(error){
+    console.error('❌ Supabase OFFLINE:',error.message);
+    if(dot)dot.style.background='#e05050';
+    if(lbl)lbl.textContent='Offline';
+  } else {
+    console.log('✅ Supabase ONLINE');
+    if(dot)dot.style.background='#1a9464';
+    if(lbl)lbl.textContent='Online';
+  }
+}).catch(e=>console.error('❌ Supabase erro:',e));
 
 // ── Primitivas ────────────────────────────
 async function sbUpsert(table,id,data){
@@ -2425,71 +2442,80 @@ async function sbDeleteAll(table){
   await sb.from(table).delete().neq('id','__none__');
 }
 
+// ── Helpers para extrair valor do Supabase ──
+// O banco salva {id, data, updated_at} — data pode ser string, array ou objeto
+function sbVal(raw){ return raw!==null&&raw!==undefined ? raw : null; }
+
 // ── Carregar TUDO do Supabase ─────────────
 async function loadFromSupabase(){
   try{
     // Pedidos
     const ords=await sbGetAll('orders');
-    if(ords.length)orders=ords.map(r=>r.data);
+    console.log('📦 orders raw:', ords.length, ords[0]||'vazio');
+    if(ords.length) orders=ords.map(r=>r.data).filter(Boolean);
 
     // Usuários
     const usrs=await sbGetAll('users');
-    if(usrs.length)users=usrs.map(r=>r.data).filter(u=>u.sector!=='gerencia');
+    console.log('👤 users raw:', usrs.length);
+    if(usrs.length) users=usrs.map(r=>r.data).filter(u=>u&&u.sector!=='gerencia');
 
     // Catálogo
     const cat=await sbGet('catalog','default');
-    if(cat&&Array.isArray(cat))catalog=cat;
+    if(cat&&Array.isArray(cat)) catalog=cat;
 
-    // Config geral
-    const nm=await sbGet('config','siteName');
-    if(nm)siteName=nm;
+    // Config — siteName
+    const nmRaw=await sbGet('config','siteName');
+    console.log('🏷 siteName raw:', nmRaw, typeof nmRaw);
+    // Pode vir como string 'DHPRO' ou objeto {siteName:'DHPRO'} ou {value:'DHPRO'}
+    if(nmRaw){
+      if(typeof nmRaw==='string') siteName=nmRaw;
+      else if(typeof nmRaw==='object'){
+        siteName=nmRaw.siteName||nmRaw.value||nmRaw.name||JSON.stringify(nmRaw);
+      }
+    }
+
+    // Config — sectorConfig
     const sc=await sbGet('config','sectorConfig');
-    if(sc){sectorConfig=sc.filter(s=>s.key!=='gerencia');localStorage.setItem('kf5_sectors',JSON.stringify(sectorConfig));buildDynamic();}
+    if(sc&&Array.isArray(sc)){
+      sectorConfig=sc.filter(s=>s.key!=='gerencia');
+      buildDynamic();
+    }
+
+    // Config — extras
     const bc=await sbGet('config','budgetCats');
-    if(bc){budgetCats=bc;localStorage.setItem('kf5_budget_cats',JSON.stringify(bc));}
+    if(bc) budgetCats=bc;
     const sp=await sbGet('config','suppliers');
-    if(sp){suppliers=sp;localStorage.setItem('kf5_suppliers',JSON.stringify(sp));}
+    if(sp) suppliers=sp;
     const pr=await sbGet('config','products');
-    if(pr){products=pr;localStorage.setItem('kf5_products',JSON.stringify(pr));}
+    if(pr) products=pr;
 
     // Orçamentos
     const buds=await sbGetAll('budgets');
-    if(buds.length)budgets=buds.map(r=>r.data);
+    if(buds.length) budgets=buds.map(r=>r.data).filter(Boolean);
 
-    // Notificações
+    // Notificações — carrega para memória
     const nfs=await sbGetAll('notifications');
     if(nfs.length){
-      const arr=nfs.map(r=>r.data);
-      localStorage.setItem('kf5_notifs',JSON.stringify(arr));
+      const arr=nfs.map(r=>r.data).filter(Boolean);
+      try{localStorage.setItem('kf5_notifs',JSON.stringify(arr));}catch(e){}
     }
 
-    console.log('✅ Supabase carregado — pedidos:',orders.length,'usuários:',users.length,'orçamentos:',budgets.length);
+    console.log('✅ Supabase OK — pedidos:',orders.length,'users:',users.length,'siteName:',siteName);
   }catch(e){
-    console.warn('⚠ Supabase load error:',e);
+    console.error('❌ Supabase load error:',e);
   }
 }
 
 // ── Salvar Pedidos ────────────────────────
 async function saveOrdersToSB(){
-  // Upsert all local orders
+  // Salva apenas os pedidos locais — sem deletar remotos
+  // (deleção só acontece via deleteOrder explícito)
   for(const o of orders) await sbUpsert('orders',o.id,o);
-  // Delete removed orders from remote
-  const {data:rows}=await sb.from('orders').select('id');
-  if(rows){
-    const localIds=new Set(orders.map(o=>o.id));
-    for(const r of rows) if(!localIds.has(r.id)) await sbDelete('orders',r.id);
-  }
 }
 
 // ── Salvar Usuários ───────────────────────
 async function saveUsersToSB(){
   for(const u of users) await sbUpsert('users',u.id,u);
-  // Remove deleted users from remote
-  const {data:rows}=await sb.from('users').select('id');
-  if(rows){
-    const localIds=new Set(users.map(u=>u.id));
-    for(const r of rows) if(!localIds.has(r.id)) await sbDelete('users',r.id);
-  }
 }
 
 // ── Salvar Catálogo ───────────────────────
@@ -2506,11 +2532,6 @@ async function saveConfigToSB(){
 // ── Salvar Orçamentos ─────────────────────
 async function saveBudgetsToSB(){
   for(const b of budgets) await sbUpsert('budgets',b.id,b);
-  const {data:rows}=await sb.from('budgets').select('id');
-  if(rows){
-    const localIds=new Set(budgets.map(b=>b.id));
-    for(const r of rows) if(!localIds.has(r.id)) await sbDelete('budgets',r.id);
-  }
 }
 
 // ── Salvar Notificações ───────────────────
@@ -2518,6 +2539,7 @@ async function saveNotifsToSB(){
   const notifs=getNotifications();
   for(const n of notifs) await sbUpsert('notifications',n.id,n);
 }
+
 
 // ── SAVE PRINCIPAL ────────────────────────
 let _saveToastTimer=null;
@@ -2548,17 +2570,12 @@ function showSaveToast(){
 }
 
 function save(){
-  // Fallback local
-  localStorage.setItem('kf5_orders',JSON.stringify(orders));
-  localStorage.setItem('kf5_cat',JSON.stringify(catalog));
-  localStorage.setItem('kf5_users',JSON.stringify(users));
-  localStorage.setItem('kf5_name',siteName);
   showSaveToast();
-  // Sync tudo para Supabase
-  saveOrdersToSB().catch(console.warn);
-  saveUsersToSB().catch(console.warn);
+  // Salva direto no Supabase — única fonte de verdade
+  if(orders.length)  saveOrdersToSB().catch(console.warn);
+  if(users.length)   saveUsersToSB().catch(console.warn);
   saveConfigToSB().catch(console.warn);
-  saveCatalogToSB().catch(console.warn);
+  if(catalog.length) saveCatalogToSB().catch(console.warn);
 }
 
 /* ════════════════════════════════════════════
@@ -2821,12 +2838,14 @@ async function doLogin(){
   if(btn){btn.textContent='Carregando...';btn.disabled=true;}
   try{
     await Promise.all([loadFromSupabase(), loadChatMsgs()]);
+    console.log('✅ Login completo — siteName:',siteName,'orders:',orders.length);
   }catch(e){
     console.warn('Supabase indisponível, usando dados locais.',e);
   }
   if(btn){btn.textContent='Entrar';btn.disabled=false;}
   document.getElementById('login-screen').style.display='none';
   document.getElementById('app').style.display='block';
+  applySite(); // aplica siteName carregado do banco ANTES de initApp
   initApp();
 }
 
@@ -3457,10 +3476,10 @@ const DEFAULT_BUDGET_CATS=[
   {id:'caixas',label:'Caixas',color:'#b86010'},
   {id:'adesivos',label:'Adesivos',color:'#0e7490'},
 ];
-let budgetCats=JSON.parse(localStorage.getItem('kf5_budget_cats')||JSON.stringify(DEFAULT_BUDGET_CATS));
-let suppliers=JSON.parse(localStorage.getItem('kf5_suppliers')||'[]');
-let products=JSON.parse(localStorage.getItem('kf5_products')||'[]');
-let budgets=JSON.parse(localStorage.getItem('kf5_budgets')||'[]');
+let budgetCats=[...DEFAULT_BUDGET_CATS];
+let suppliers=[];
+let products=[];
+let budgets=[];
 
 function setAdminTab(tab,el){
   curAdminTab=tab;
@@ -3485,8 +3504,7 @@ function setAdminTab(tab,el){
 }
 
 function saveSectorConfig(){
-  localStorage.setItem('kf5_sectors',JSON.stringify(sectorConfig));
-  buildDynamic();
+    buildDynamic();
   lBuildSectors();
   refreshAll();
   updateSB();
@@ -3794,8 +3812,7 @@ function renderMonitor(){
    BUDGETS
 ════════════════════════════════════════════ */
 function saveBudgets(){
-  localStorage.setItem('kf5_budgets',JSON.stringify(budgets));
-  localStorage.setItem('kf5_budget_cats',JSON.stringify(budgetCats));
+
   saveBudgetsToSB().catch(console.warn);
   applyBudgetCatCSS();
 }
@@ -3805,16 +3822,13 @@ function applyBudgetCatCSS(){
   el.textContent=budgetCats.map(c=>`.bcard-tipo.cat-${c.id}{color:${c.color};border-color:${c.color};}`).join('\n');
 }
 function saveSuppliers(){
-  localStorage.setItem('kf5_suppliers',JSON.stringify(suppliers));
   sbUpsert('config','suppliers',suppliers).catch(console.warn);
 }
 function saveProducts(){
-  localStorage.setItem('kf5_products',JSON.stringify(products));
   sbUpsert('config','products',products).catch(console.warn);
 }
 function saveSuppliersThen(cb){saveSuppliers();if(cb)cb();}
 function saveBudgetCats(){
-  localStorage.setItem('kf5_budget_cats',JSON.stringify(budgetCats));
   sbUpsert('config','budgetCats',budgetCats).catch(console.warn);
   applyBudgetCatCSS();
   renderBudgetTabs();
