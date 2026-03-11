@@ -2419,6 +2419,12 @@ sb.from('config').select('id').limit(1).then(({data,error})=>{
     if(lbl)lbl.textContent='Online';
   }
 }).catch(e=>console.error('❌ Supabase erro:',e));
+// Pré-carrega siteName para mostrar nome correto na tela de login
+sbGet('config','siteName').then(nm=>{
+  if(nm&&typeof nm==='string'){siteName=nm;}
+  else if(nm&&typeof nm==='object'){siteName=nm.siteName||nm.value||nm.name||siteName;}
+  applySite();
+}).catch(()=>{applySite();});
 
 // ── Primitivas ────────────────────────────
 async function sbUpsert(table,id,data){
@@ -6717,14 +6723,13 @@ function initChat(){
 </script>
 
 <script>
-applySite();
-
+// applySite() agora só é chamado após carregar Supabase no login
 // PWA Manifest (inline blob)
 (function(){
   const manifest = {
-    name: "KitFlow TV",
-    short_name: "KitFlow TV",
-    description: "Painel de Produção KitFlow",
+    name: siteName+" TV",
+    short_name: siteName,
+    description: "Painel de Produção "+siteName,
     start_url: "./",
     display: "fullscreen",
     orientation: "landscape",
